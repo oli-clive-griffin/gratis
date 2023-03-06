@@ -1,17 +1,9 @@
-// create nodes with values
-// do operations on them
-// differentiate operations
+(console as any).pp = (a: any) => console.log(JSON.stringify(a, null, 2))
 
-// type DifferentiableNode = {
-//   value: number
-//   gradientFunc: (value: number) => number
-// }
-
-const a = 2
-const x = 4
-const b = 7
-
-const y = a * x + b
+// We want to be able to
+//  - create nodes with values
+//  - do operations on them
+//  - differentiate operations
 
 //          y
 //          |
@@ -40,41 +32,11 @@ const y = a * x + b
 //   - a = x
 //   - x = a
 
-// So therefore somewhere needs to hold the fact of which nodes are operated together
-//
-// Should it be a graph?
-// something like:
-// const expr = {
-//   value: 15,
-//   resultOf: {
-//     op: '+',
-//     children: [
-//       {
-//         value: 8,
-//         resultOf: {
-//           op: '*',
-//           children: [
-//             {
-//               value: 2,
-//             },
-//             {
-//               value: 4,
-//             }
-//           ]
-//         }
-//       },
-//       {
-//         value: 7
-//       }
-//     ]
-//   }
-// }
-
-type Op = {
+type Op<Args extends number[] = number[]> = {
+// type Op = {
   symbol: string;
-  forward: (a: number, b: number) => number;
-  backward: (a: number, b: number) => [number, number];
-  // backwardForOne: (one: number, other: number) => number;
+  forward: (...args: Args) => number;
+  backward: (...args: Args) => Args;
 }
 
 type Expr = (
@@ -97,65 +59,27 @@ type ExprWithDx = (
   | { type: 'calc', calc: CalcWithDx }
 )
 
-// I think these types make sense
-//  - Op represents any generic operation between 2 children
-//  - Calculation represents the application of an operation to it it's operands
-//  - Expr is a "thing" that holds to record of how it came be be.
-
-// const Mul: Op = {
-//   symbol: '*',
-//   forward: (a, b) => a.value * b.value,
-//   backward: (a, b) => [b.value, a.value],
-// }
-
-// const Add: Op = {
-//   symbol: '+',
-//   forward: (a, b) => a.value + b.value,
-//   backward: (_a, _b) => [1, 1],
-// }
-
 const Mul: Op = {
   symbol: '*',
-  forward: (a, b) => a * b,
-  backward: (a, b) => [b, a],
+  forward: (...args) => args.reduce((a, c) => a * c, 1),
+  backward: (...args) => {
+    const total = args.reduce((a, c) => a * c, 1);
+    return args.map(a => total / a);
+  },
 }
 
 const Add: Op = {
   symbol: '+',
-  forward: (a, b) => a + b,
-  backward: (_a, _b) => [1, 1],
+  forward: (...args) => args.reduce((a, c) => a + c, 0),
+  backward: (...args) => args.map(_a => 1),
 }
 
-const expr1: Calc = {
-  op: Add,
-  children: [{
-    type: 'calc',
-    calc: {
-      op: Mul,
-      children: [{
-        type: 'val',
-        value: 2,
-      }, {
-        type: 'val',
-        value: 4,
-      }]
-    }
-  }, {
-    type: 'val',
-    value: 7,
-  }]
+const Exp: Op = {
+  symbol: 'e^',
+  forward: (x) => Math.exp(x),
+  backward: (x) => [x],
 }
 
-const expr2: Calc = {
-  op: Mul,
-  children: [{
-    type: 'val',
-    value: 8,
-  }, {
-    type: 'val',
-    value: 3,
-  }]
-}
 
 // I think if we can generate graphs like the above, we'll be able to traverse them backwards and generate the gradients above
 // I want add(mul(a, x), b)
@@ -169,16 +93,13 @@ const apply = (op: Op, a: Expr, b: Expr): Calc => {
   }
 }
 
-
 function val(value: number): Expr {
   return { type: 'val', value }
 }
 
-function calc(calc: Calc): Expr {
+function calcExpr(calc: Calc): Expr {
   return { type: 'calc', calc }
 }
-
-const Expr = { fromVal: val, fromCalc: calc }
 
 function valueOf(e: Expr): number {
   if (e.type === 'val')
@@ -189,51 +110,57 @@ function valueOf(e: Expr): number {
   return calc.op.forward(valueOf(calc.children[0]), valueOf(calc.children[1]))
 }
 
-function zip<T1, T2>(a1: T1[], a2: T2[]): [T1, T2][] {
-  return a1.map((e, i) => [e, a2[i]])
-}
-
-// function withPartialDervitives
-function partialDerivativesOf(calc: Calc, upstreamGradient = 1): CalcWithDx {
+// the default `1` here can be thought of the the gradient of the loss wrt the loss. very simple
+function withDx(calc: Calc, upstreamGradient = 1): CalcWithDx {
 
   const values = calc.children.map(valueOf) // (calc.children[0]), valueOf(calc.children[1])]
-  const grads = calc.op.backward(...values as [number, number]).map(g => g * upstreamGradient)
+  const grads = calc.op.backward(...values).map(g => g * upstreamGradient)
 
   let children: ExprWithDx[] = [];
 
-  for (const i of [0, 1]) {
+  for (const i of Array(calc.children.length).keys()) {
     const child = calc.children[i]
     const grad = grads[i]
 
     if (child.type === 'val') {
-      children.push({ ...child, grad })
+      children.push({
+        ...child,
+        grad,
+      })
     }
     else if (child.type === 'calc') {
-      children.push({ ...child, calc: partialDerivativesOf(child.calc, grad) });
+      children.push({
+        ...child,
+        calc: withDx(child.calc, grad),
+      });
     }
   }
 
   return {
-    op: calc.op,
+    ...calc,
     children,
   }
 }
 
-const mul = (a: Expr, b: Expr) => calc(apply(Mul, a, b))
-const add = (a: Expr, b: Expr) => calc(apply(Add, a, b))
+const mul = (a: Expr, b: Expr) => calcExpr(apply(Mul, a, b))
+const add = (a: Expr, b: Expr) => calcExpr(apply(Add, a, b))
 
-//-//-//-//-//-//-//-//-//-//-//-//-//-//-//-//-//-//-
-
-
+// ------------------------------------------------------------------------ //
 
 const res = add(val(1.2), mul(val(8), val(3)))
 
-console.log(res)
-console.log(valueOf(res));
-// console.log(partialDerivativesOf(calc(res))))
+// console.log(res)
+// console.log(valueOf(res));
+// console.log(withDx(calc(res))))
 
-const rescalc = apply(Add, val(1.2), mul(val(8), val(3)))
+// const rescalc = apply(Add, val(1.2), mul(val(8), val(3)))
+// const a = withDx(rescalc)
+// console.log(JSON.stringify(a, null, 2))
 
-console.log(JSON.stringify(partialDerivativesOf(rescalc), null, 2))
-
+const a = val(8);
+const x = val(3);
+const y = mul
+const resCalc2 = apply(Mul, val(1.2), a)
+const b = withDx(resCalc2)
+console.log(JSON.stringify(b, null, 2))
 
